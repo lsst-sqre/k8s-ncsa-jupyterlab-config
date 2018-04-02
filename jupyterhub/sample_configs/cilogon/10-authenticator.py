@@ -10,7 +10,7 @@ from tornado.httpclient import HTTPRequest, AsyncHTTPClient
 from tornado.httputil import url_concat
 
 CILOGON_HOST = os.environ.get('CILOGON_HOST') or 'cilogon.org'
-
+STRICT_LDAP_GROUPS = os.environ.get('STRICT_LDAP_GROUPS')
 
 class LSSTAuth(oauthenticator.CILogonOAuthenticator):
     """Authenticator to use our custom environment settings.
@@ -37,8 +37,10 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
             user_rec = userdict["auth_state"]["cilogon_user"]
             if "eppn" in user_rec:
                 username, domain = user_rec["eppn"].split("@")
-                if domain != self._default_domain:
-                    username = username + "." + domain
+            if "uid" in user_rec:
+                username = user_rec["uid"]
+            if domain != self._default_domain:
+                username = username + "." + domain
             userdict["name"] = username
         return userdict
 
@@ -60,68 +62,63 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
             return False
         self.log.debug("Auth State: %s" % json.dumps(ast,sort_keys=True,
                                                      indent=4))
-        url = "https://%s/oauth2/util" % CILOGON_HOST
-        self.log.debug("Util endpoint: %s" % url)
-        token = ast["token_response"]["id_token"]
-        params = {
-            "action": "check_claim",
-            "claim_name": "isMemberOf",
-            "token": token
-        }
-        allowed_groups = self.allowed_groups.split(",")
-        http_client = AsyncHTTPClient()
-        uname = userdict["name"]
-        for group in allowed_groups:
-            params.update({"claim_value": "cn=%s" % group})
-            param_url = url_concat(url, params)
-            req = HTTPRequest(param_url, method="GET")
-            self.log.debug("Request: %s" % param_url)
-            resp = yield http_client.fetch(req)
-            text = resp.body.decode('utf8', 'replace').rstrip()
-            try:
-                rstruct = json.loads(text)
-            except json.decoder.JSONDecodeError:
-                self.log.error("Could not decode response '%s'" % text)
-                continue
-            try:
-                status = rstruct["status"]
-            except KeyError:
-                self.log.error("No 'status' field in '%r'" % rstruct)
-                continue
-            if status == "ok":
-                self.log.info("User %s is in group %s" % (uname, group))
-                return True
-            else:
-                self.log.info("User %s is not in group %s: %s" % (uname,
-                                                                  group,
-                                                                  status))
-        self.log.warn("User %s not in any group in %r" %
-                      (uname, allowed_groups))
-        return False
+        return True
+        #url = "https://%s/oauth2/util" % CILOGON_HOST
+        #self.log.debug("Util endpoint: %s" % url)
+        #token = ast["token_response"]["id_token"]
+        #params = {
+        #    "action": "check_claim",
+        #    "claim_name": "isMemberOf",
+        #    "token": token
+        #}
+        #allowed_groups = self.allowed_groups.split(",")
+        #http_client = AsyncHTTPClient()
+        #uname = userdict["name"]
+        #for group in allowed_groups:
+        #    params.update({"claim_value": "cn=%s" % group})
+        #    param_url = url_concat(url, params)
+        #    req = HTTPRequest(param_url, method="GET")
+        #    self.log.debug("Request: %s" % param_url)
+        #    resp = yield http_client.fetch(req)
+        #    text = resp.body.decode('utf8', 'replace').rstrip()
+        #    try:
+        #        rstruct = json.loads(text)
+        #    except json.decoder.JSONDecodeError:
+        #        self.log.error("Could not decode response '%s'" % text)
+        #        continue
+        #    try:
+        #        status = rstruct["status"]
+        #    except KeyError:
+        #        self.log.error("No 'status' field in '%r'" % rstruct)
+        #        continue
+        #    if status == "ok":
+        #        self.log.info("User %s is in group %s" % (uname, group))
+        #        return True
+        #    else:
+        #        self.log.info("User %s is not in group %s: %s" % (uname,
+        #                                                          group,
+        #                                                          status))
+        #self.log.warn("User %s not in any group in %r" %
+        #              (uname, allowed_groups))
+        #return False
 
     @gen.coroutine
     def _return_groups(self, grouplist):
-        grps = []
-        for ldapfield in grouplist:
-            fldlist = ldapfield.split(",")
-            rec = {}
-            for fld in fldlist:
-                k, v = fld.split("=")
-                rec[k] = v  # This flattens dc but we don't care
-            if "ou" not in rec or rec["ou"] != "Groups":
-                continue  # Not the droid we're looking_for
-            grps.append(rec["cn"])
+        grps = [ x["name"] for x in grouplist ]
+        self.log.debug("Groups: %s" % str(grps))
         return grps
 
     @gen.coroutine
     def _check_member_of(self, grouplist):
-        self.log.info("Using undocumented isMemberOf field.")
+        self.log.info("Using isMemberOf field.")
         allowed_groups = self.allowed_groups.split(",")
         user_groups = yield self._return_groups(grouplist)
         intersection = list(set(allowed_groups) &
                             set(user_groups))
         if intersection:
+            self.log.debug("User in groups: %s" % str(intersection))
             return True
+        self.log.warning("User not in any groups %s" % str(allowed_groups))
         return False
 
     @gen.coroutine
@@ -200,20 +197,33 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
             auth_state["token_response"] = save_token
             if "cilogon_user" in auth_state:
                 user_rec = auth_state["cilogon_user"]
-                sub = user_rec.get("sub")
-                if sub:
-                    uid = sub.split("/")[-1]  # We pretend last field is UID
-                    spawner.environment['EXTERNAL_UID'] = uid
-                    # We want UID/GIDs from OAuth2
+                # Get UID and GIDs from OAuth reply
+                uid = user_rec.get("uidNumber")
+                if uid:
+                    uid=str(uid)
+                else:
+                    # Fake it
+                    sub = user_rec.get("sub")
+                    if sub:
+                        uid = sub.split("/")[-1]  # Pretend last field is UID
+                spawner.environment['EXTERNAL_UID'] = uid
                 membership = user_rec.get("isMemberOf")
                 if membership:
                     user_groups = yield self._return_groups(membership)
+                    # We use a fake number if there is no matching 'id'
                     gidlist = []
-                    # This is faked until we get GIDs from OAuth2
-                    igrp = 5000
-                    for grp in user_groups:
-                        gidlist.append(grp + ":" + str(igrp))
-                        igrp = igrp + 1
+                    igrp = 3002018 # Outside 16 bits, unlikely to collide
+                    for group in membership:
+                        gname = group["name"]
+                        if "id" in group:
+                            gid = group["id"]
+                        else:
+                            # Skip if strict groups and no GID
+                            if STRICT_LDAP_GROUPS:
+                                continue
+                            gid = igrp
+                            igrp = igrp + 1
+                        gidlist.append(gname + ":" + str(gid))
                     grplist = ",".join(gidlist)
                     spawner.environment['EXTERNAL_GROUPS'] = grplist
                     # Might be nice to have a mixin to also get GitHub
