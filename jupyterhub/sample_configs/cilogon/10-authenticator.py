@@ -5,6 +5,7 @@ authentication and authorization decisions.
 import json
 import os
 import oauthenticator
+import random
 from tornado import gen, web
 from tornado.httpclient import HTTPRequest, AsyncHTTPClient
 from tornado.httputil import url_concat
@@ -63,44 +64,6 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
         self.log.debug("Auth State: %s" % json.dumps(ast,sort_keys=True,
                                                      indent=4))
         return True
-        #url = "https://%s/oauth2/util" % CILOGON_HOST
-        #self.log.debug("Util endpoint: %s" % url)
-        #token = ast["token_response"]["id_token"]
-        #params = {
-        #    "action": "check_claim",
-        #    "claim_name": "isMemberOf",
-        #    "token": token
-        #}
-        #allowed_groups = self.allowed_groups.split(",")
-        #http_client = AsyncHTTPClient()
-        #uname = userdict["name"]
-        #for group in allowed_groups:
-        #    params.update({"claim_value": "cn=%s" % group})
-        #    param_url = url_concat(url, params)
-        #    req = HTTPRequest(param_url, method="GET")
-        #    self.log.debug("Request: %s" % param_url)
-        #    resp = yield http_client.fetch(req)
-        #    text = resp.body.decode('utf8', 'replace').rstrip()
-        #    try:
-        #        rstruct = json.loads(text)
-        #    except json.decoder.JSONDecodeError:
-        #        self.log.error("Could not decode response '%s'" % text)
-        #        continue
-        #    try:
-        #        status = rstruct["status"]
-        #    except KeyError:
-        #        self.log.error("No 'status' field in '%r'" % rstruct)
-        #        continue
-        #    if status == "ok":
-        #        self.log.info("User %s is in group %s" % (uname, group))
-        #        return True
-        #    else:
-        #        self.log.info("User %s is not in group %s: %s" % (uname,
-        #                                                          group,
-        #                                                          status))
-        #self.log.warn("User %s not in any group in %r" %
-        #              (uname, allowed_groups))
-        #return False
 
     @gen.coroutine
     def _return_groups(self, grouplist):
@@ -156,20 +119,39 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
         # Start with nothing (no persistent storage!)
         #
         # Persistent shared user volume
-        #volname = "jld-fileserver-home"
-        #homefound = False
-        #for v in spawner.volumes:
-        #    if v["name"] == volname:
-        #        homefound = True
-        #        break
-        #if not homefound:
-        #    spawner.volumes.extend([
-        #        {"name": volname,
-        #         "persistentVolumeClaim":
-        #         {"claimName": volname}}])
-        #    spawner.volume_mounts.extend([
-        #        {"mountPath": "/home",
-        #         "name": volname}])
+        volname = "jld-fileserver-home"
+        homefound = False
+        for v in spawner.volumes:
+            if v["name"] == volname:
+                homefound = True
+                break
+        if not homefound:
+            spawner.volumes.extend([
+                {"name": volname,
+                 "persistentVolumeClaim":
+                 {"claimName": volname}}])
+            spawner.volume_mounts.extend([
+                {"mountPath": "/home",
+                 "name": volname,
+                 "accessModes": "ReadOnlyMany" }])
+        for vol in [ "project", "scratch"]:
+            volname = "jld-fileserver-" + vol
+            spawner.volumes.extend([
+                {"name": volname,
+                 "persistentVolumeClaim": {"claimName": volname} } ] )
+            spawner.volume_mounts.extend([
+                {"mountPath": "/" + vol,
+                 "name": volname,
+                 "accessModes": [ "ReadWriteMany" ] } ] )
+        for vol in [ "datasets", "software"]:
+            volname = "jld-fileserver-" + vol
+            spawner.volumes.extend([
+                {"name": volname,
+                 "persistentVolumeClaim": {"claimName": volname},
+                 "accessModes": ["ReadOnlyMany" ] } ] )
+            spawner.volume_mounts.extend([
+                {"mountPath": "/" + vol,
+                 "name": volname }])
         # We are running the Lab at the far end, not the old Notebook
         spawner.default_url = '/lab'
         spawner.singleuser_image_pull_policy = 'Always'
@@ -211,8 +193,15 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
                 if membership:
                     user_groups = yield self._return_groups(membership)
                     # We use a fake number if there is no matching 'id'
+                    # Pick something outside of 16 bits, way under 32,
+                    #  and high enough that we are unlikely to have
+                    #  collisions.  Turn on STRICT_LDAP_GROUPS by
+                    #  setting the environment variable if you want to
+                    #  just skip those.
                     gidlist = []
-                    igrp = 3002018 # Outside 16 bits, unlikely to collide
+                    grpbase = 3E7
+                    grprange = 1E7
+                    igrp = random.randint(grpbase,(grpbase+grprange))
                     for group in membership:
                         gname = group["name"]
                         if "id" in group:
