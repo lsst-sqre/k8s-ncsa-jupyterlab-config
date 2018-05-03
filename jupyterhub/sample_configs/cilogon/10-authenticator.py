@@ -13,6 +13,7 @@ from tornado.httputil import url_concat
 CILOGON_HOST = os.environ.get('CILOGON_HOST') or 'cilogon.org'
 STRICT_LDAP_GROUPS = os.environ.get('STRICT_LDAP_GROUPS')
 
+
 class LSSTAuth(oauthenticator.CILogonOAuthenticator):
     """Authenticator to use our custom environment settings.
     """
@@ -21,6 +22,7 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
     _default_domain = "ncsa.illinois.edu"
     login_handler = oauthenticator.CILogonLoginHandler
     allowed_groups = os.environ.get("CILOGON_GROUP_WHITELIST") or "lsst_users"
+    forbidden_groups = os.environ.get("CILOGON_GROUP_DENYLIST")
 
     @gen.coroutine
     def authenticate(self, handler, data=None):
@@ -61,13 +63,13 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
                 ast["token_response"]["id_token"]):
             self.log.warn("User doesn't have ID token!")
             return False
-        self.log.debug("Auth State: %s" % json.dumps(ast,sort_keys=True,
+        self.log.debug("Auth State: %s" % json.dumps(ast, sort_keys=True,
                                                      indent=4))
         return True
 
     @gen.coroutine
     def _return_groups(self, grouplist):
-        grps = [ x["name"] for x in grouplist ]
+        grps = [x["name"] for x in grouplist]
         self.log.debug("Groups: %s" % str(grps))
         return grps
 
@@ -75,7 +77,14 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
     def _check_member_of(self, grouplist):
         self.log.info("Using isMemberOf field.")
         allowed_groups = self.allowed_groups.split(",")
+        forbidden_groups = self.forbidden_groups.split(",")
         user_groups = yield self._return_groups(grouplist)
+        deny = list(set(forbidden_groups) & set(user_groups))
+        if deny:
+            self.log.warning("User in forbidden group: %s" % str(deny))
+            return False
+        self.log.debug("User not in forbidden groups: %s" % \
+                       str(forbidden_groups))
         intersection = list(set(allowed_groups) &
                             set(user_groups))
         if intersection:
@@ -113,45 +122,43 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
         spawner.cpu_limit = cpulim
         spawner.mem_guarantee = memguar
         spawner.cpu_guarantee = cpuguar
-        #
-        # Create NCSA mounted volumes
-        #
-        # Start with nothing (no persistent storage!)
-        #
-        # Persistent shared user volume
-        volname = "jld-fileserver-home"
-        homefound = False
-        for v in spawner.volumes:
-            if v["name"] == volname:
-                homefound = True
-                break
-        if not homefound:
-            spawner.volumes.extend([
-                {"name": volname,
-                 "persistentVolumeClaim":
-                 {"claimName": volname}}])
-            spawner.volume_mounts.extend([
-                {"mountPath": "/home",
-                 "name": volname,
-                 "accessModes": "ReadOnlyMany" }])
-        for vol in [ "project", "scratch"]:
+        # The standard set of LSST volumes is mountpoints at...
+        #  /home
+        #  /project
+        #  /scratch
+        #  /datasets
+        #  /software
+        # Where software and datasets are read/only and the others are
+        #  read/write
+        spawner_volnames = [x["name"] for x in spawner.volumes]
+        for vol in ["home", "project", "scratch"]:
             volname = "jld-fileserver-" + vol
+            if volname in spawner_volnames:
+                continue
             spawner.volumes.extend([
                 {"name": volname,
-                 "persistentVolumeClaim": {"claimName": volname} } ] )
+                 "persistentVolumeClaim": {"claimName": volname}}])
             spawner.volume_mounts.extend([
                 {"mountPath": "/" + vol,
                  "name": volname,
-                 "accessModes": [ "ReadWriteMany" ] } ] )
-        for vol in [ "datasets", "software"]:
+                 "accessModes": ["ReadWriteMany"]}])
+        for vol in ["datasets", "software"]:
             volname = "jld-fileserver-" + vol
+            if volname in spawner_volnames:
+                continue
             spawner.volumes.extend([
                 {"name": volname,
-                 "persistentVolumeClaim": {"claimName": volname},
-                 "accessModes": ["ReadOnlyMany" ] } ] )
+                 "persistentVolumeClaim": {"claimName": volname}}])
             spawner.volume_mounts.extend([
                 {"mountPath": "/" + vol,
-                 "name": volname }])
+                 "name": volname,
+                 "accessModes": ["ReadOnlyMany"]}])
+        self.log.debug("Volumes: %s" % json.dumps(spawner.volumes,
+                                                  indent=4,
+                                                  sort_keys=True))
+        self.log.debug("Volume mounts: %s" % json.dumps(spawner.volume_mounts,
+                                                        indent=4,
+                                                        sort_keys=True))
         # We are running the Lab at the far end, not the old Notebook
         spawner.default_url = '/lab'
         spawner.singleuser_image_pull_policy = 'Always'
@@ -182,7 +189,7 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
                 # Get UID and GIDs from OAuth reply
                 uid = user_rec.get("uidNumber")
                 if uid:
-                    uid=str(uid)
+                    uid = str(uid)
                 else:
                     # Fake it
                     sub = user_rec.get("sub")
@@ -201,7 +208,7 @@ class LSSTAuth(oauthenticator.CILogonOAuthenticator):
                     gidlist = []
                     grpbase = 3E7
                     grprange = 1E7
-                    igrp = random.randint(grpbase,(grpbase+grprange))
+                    igrp = random.randint(grpbase, (grpbase + grprange))
                     for group in membership:
                         gname = group["name"]
                         if "id" in group:
